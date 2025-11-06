@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 from casm_lang import run_program
+import re
 
 class CAsmIDE:
     def __init__(self, root):
@@ -11,29 +12,30 @@ class CAsmIDE:
 
         self._build_ui()
         self._insert_example()
+        self._add_highlighting()  # добавили подсветку
 
     def _build_ui(self):
         top = tk.Frame(self.root)
         top.pack(fill=tk.BOTH, expand=True)
 
-        self.editor = scrolledtext.ScrolledText(top, font=("Consolas", 13), wrap=tk.NONE)
+        self.editor = scrolledtext.ScrolledText(top, font=("Consolas", 13), wrap=tk.NONE, bg="#111", fg="#ffd9b3", insertbackground="#ff784e")
         self.editor.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
-        right = tk.Frame(top, width=320)
+        right = tk.Frame(top, width=320, bg="#1a1a1a")
         right.pack(fill=tk.Y, side=tk.RIGHT, padx=6, pady=6)
 
-        run_btn = tk.Button(right, text="▶ Run", command=self.run_code, width=12, height=2, bg="#4CAF50", fg="white")
+        run_btn = tk.Button(right, text="▶ Run", command=self.run_code, width=12, height=2, bg="#e2544b", fg="white", relief=tk.FLAT)
         run_btn.pack(pady=6)
 
-        save_btn = tk.Button(right, text="💾 Save", command=self.save_file, width=12)
+        save_btn = tk.Button(right, text="💾 Save", command=self.save_file, width=12, bg="#ffb457", fg="#111", relief=tk.FLAT)
         save_btn.pack(pady=4)
-        load_btn = tk.Button(right, text="📂 Load", command=self.load_file, width=12)
+        load_btn = tk.Button(right, text="📂 Load", command=self.load_file, width=12, bg="#ffb457", fg="#111", relief=tk.FLAT)
         load_btn.pack(pady=4)
 
-        clear_btn = tk.Button(right, text="Clear Output", command=self.clear_output, width=12)
+        clear_btn = tk.Button(right, text="Clear Output", command=self.clear_output, width=12, bg="#e2544b", fg="white", relief=tk.FLAT)
         clear_btn.pack(pady=8)
 
-        self.output = scrolledtext.ScrolledText(self.root, height=10, bg="#111", fg="#0f0", font=("Consolas", 12))
+        self.output = scrolledtext.ScrolledText(self.root, height=10, bg="#0b0a0a", fg="#ffa8c3", font=("Consolas", 12))
         self.output.pack(fill=tk.X, padx=6, pady=6)
         self.output.config(state=tk.DISABLED)
 
@@ -79,6 +81,45 @@ print(x);
         self.editor.delete(1.0, tk.END)
         self.editor.insert(tk.END, example)
 
+    # 🔥 --- Подсветка синтаксиса ---
+    def _add_highlighting(self):
+        self.colors = {
+            "keyword": "#ff4f87",   # розовый
+            "command": "#ff6f61",   # коралловый
+            "number": "#ffb84c",    # тёплый жёлтый
+            "string": "#ff7a45",    # оранжевый
+            "comment": "#c77dff",   # фиолетовый
+            "asm": "#ff3c38"        # красный
+        }
+
+        for tag, color in self.colors.items():
+            self.editor.tag_configure(tag, foreground=color)
+
+        self.editor.bind("<KeyRelease>", self._highlight_code)
+        self.editor.bind("<ButtonRelease>", self._highlight_code)
+        self._highlight_code()
+
+    def _highlight_code(self, event=None):
+        text = self.editor.get("1.0", "end-1c")
+        for tag in self.colors:
+            self.editor.tag_remove(tag, "1.0", "end")
+
+        rules = {
+            "keyword": r"\b(int|if|else|while|asm|return|print)\b",
+            "command": r"\b(window|camera|object|move|rotate|render)\b",
+            "number": r"\b\d+(\.\d+)?\b",
+            "string": r'"[^"\n]*"',
+            "comment": r"//[^\n]*",
+            "asm": r"\b(MOV|ADD|SUB|INC|DEC|CMP|JMP|JE|JNE|LOAD|STORE)\b",
+        }
+
+        for tag, pattern in rules.items():
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                start = f"1.0+{match.start()}c"
+                end = f"1.0+{match.end()}c"
+                self.editor.tag_add(tag, start, end)
+
+    # --- остальное без изменений ---
     def run_code(self):
         src = self.editor.get(1.0, tk.END)
         self.output.config(state=tk.NORMAL)
