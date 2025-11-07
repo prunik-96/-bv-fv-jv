@@ -1,34 +1,74 @@
-
-#   window <width> <height> <title_id>;
-#     Пример: window 800 600 Demo;
+# casm_lang.py — CAsm + squads/dft + мини-3D движок (tkinter)
+# Новые конструкции:
+#   squad Name { int a=1; dft m(p){ ... } }
+#   Name obj;                 // создать объект класса Name с дефолтными полями
+#   obj.field = expr;         // доступ к полям
+#   obj.method(arg1, arg2);   // вызов метода
+#   dft func(a,b){ return a+b; }  // глобальная функция
+#
+# Совместимые команды 3D:
+#   window <w> <h> <title>;
+#   camera <x> <y> <z>;
+#   object cube|sphere <name> <x> <y> <z> <size> <color>;
+#   move <name> <dx> <dy> <dz>;
+#   rotate <name> <rx> <ry> <rz>;
+#   render;
 
 import re
 import math
 import tkinter as tk
 
-# ---------- Мини 3D-движок ----------
+# ---------------- Mini 3D Engine (с безопасным повторным открытием) ----------------
 class Mini3DEngine:
     def __init__(self):
-        self.objects = {}  # name -> dict
-        self.camera = [0.0, 0.0, -5.0]  # позиция камеры в мире
+        self.objects = {}
+        self.camera = [0.0, 0.0, -5.0]
         self.root = None
         self.canvas = None
         self.width = 800
         self.height = 600
         self.bg = "black"
 
+    def is_alive(self):
+        try:
+            return self.root is not None and bool(self.root.winfo_exists())
+        except Exception:
+            return False
+
+    def _on_close(self):
+        try:
+            if self.root is not None:
+                root = self.root
+                self.root = None
+                self.canvas = None
+                try:
+                    root.after(1, root.destroy)
+                except Exception:
+                    pass
+        except Exception:
+            self.root = None
+            self.canvas = None
+
+    def reset_scene(self):
+        self.objects = {}
+        if not self.is_alive():
+            self.root = None
+            self.canvas = None
+
     def window(self, w, h, title_id="CAsm3D"):
         self.width, self.height = int(w), int(h)
-        if self.root is None:
+        if not self.is_alive():
             self.root = tk.Tk()
             self.root.title(str(title_id))
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
             self.canvas = tk.Canvas(self.root, width=self.width, height=self.height, bg=self.bg, highlightthickness=0)
             self.canvas.pack()
+            self.root.update_idletasks()
             self.root.update()
         else:
-            # переинициализация размера/заголовка
             self.root.title(str(title_id))
             self.canvas.config(width=self.width, height=self.height)
+            self.root.update_idletasks()
             self.root.update()
 
     def set_camera(self, x, y, z):
@@ -38,7 +78,7 @@ class Mini3DEngine:
         self.objects[name] = {
             "type": str(type_),
             "x": float(x), "y": float(y), "z": float(z),
-            "rx": 0.0, "ry": 0.0, "rz": 0.0,  # пока «логические» углы
+            "rx": 0.0, "ry": 0.0, "rz": 0.0,
             "size": float(size),
             "color": str(color_id)
         }
@@ -55,10 +95,7 @@ class Mini3DEngine:
             self.objects[name]["ry"] += float(ry)
             self.objects[name]["rz"] += float(rz)
 
-    # примитивная перспективная проекция (без настоящего поворота по осям)
     def project(self, x, y, z):
-        # сдвигаем относительно камеры: камера смотрит вдоль +Z (условно)
-        # добавим смещение по Z, чтобы всё не делилось на 0
         rel_z = (z - self.camera[2])
         if rel_z == 0:
             rel_z = 1e-3
@@ -68,38 +105,40 @@ class Mini3DEngine:
         return sx, sy, f
 
     def render(self):
-        if self.root is None or self.canvas is None:
-            # если окна ещё нет — насоздаём дефолтное
-            self.window(self.width, self.height, "CAsm3D")
+        if not self.is_alive():
+            return
+        try:
+            self.canvas.delete("all")
 
-        self.canvas.delete("all")
+            def depth(o):
+                return o["z"] - self.camera[2]
 
-        # простая отрисовка — сперва отсортируем по глубине, чтобы дальнее рисовалось раньше
-        # глубина: (z - cam.z)
-        def depth(obj):
-            return obj["z"] - self.camera[2]
+            for o in sorted(self.objects.values(), key=depth, reverse=True):
+                sx, sy, f = self.project(o["x"], o["y"], o["z"])
+                s = max(1.0, o["size"] * f)
+                c = o["color"]
 
-        for obj in sorted(self.objects.values(), key=depth, reverse=True):
-            sx, sy, f = self.project(obj["x"], obj["y"], obj["z"])
-            s = max(1.0, obj["size"] * f)  # «визуальный размер» зависит от расстояния (очень грубо)
-            color = obj["color"]
+                if o["type"] == "cube":
+                    self.canvas.create_rectangle(sx - s, sy - s, sx + s, sy + s, outline=c, width=2)
+                    self.canvas.create_line(sx - s, sy - s, sx - s * 0.6, sy - s * 1.4, fill=c)
+                    self.canvas.create_line(sx + s, sy - s, sx + s * 0.6, sy - s * 1.4, fill=c)
+                    self.canvas.create_line(sx - s * 0.6, sy - s * 1.4, sx + s * 0.6, sy - s * 1.4, fill=c)
+                elif o["type"] == "sphere":
+                    self.canvas.create_oval(sx - s, sy - s, sx + s, sy + s, outline=c, width=2)
 
-            if obj["type"] == "cube":
-                self.canvas.create_rectangle(sx - s, sy - s, sx + s, sy + s, outline=color, width=2)
-                # лёгкая «псевдо-3D» грань
-                self.canvas.create_line(sx - s, sy - s, sx - s*0.6, sy - s*1.4, fill=color)
-                self.canvas.create_line(sx + s, sy - s, sx + s*0.6, sy - s*1.4, fill=color)
-                self.canvas.create_line(sx - s*0.6, sy - s*1.4, sx + s*0.6, sy - s*1.4, fill=color)
-            elif obj["type"] == "sphere":
-                self.canvas.create_oval(sx - s, sy - s, sx + s, sy + s, outline=color, width=2)
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            self._on_close()
 
-        self.root.update()
 
 ENGINE = Mini3DEngine()
 
-# ---------- Lexer ----------
+# ---------------- Lexer ----------------
 TOKEN_SPEC = [
+    ('STRING',   r'"[^"\n]*"'),
     ('NUMBER',   r'\d+(\.\d+)?'),
+    ('DOT',      r'\.'),
     ('ID',       r'[A-Za-z_][A-Za-z0-9_]*'),
     ('OP',       r'==|!=|<=|>=|\+|\-|\*|/|%|<|>|\='),
     ('SEMIC',    r';'),
@@ -114,7 +153,12 @@ TOKEN_SPEC = [
     ('MISMATCH', r'.'),
 ]
 TOK_REGEX = re.compile('|'.join(f'(?P<{n}>{p})' for n, p in TOKEN_SPEC))
-KEYWORDS = {'int', 'print', 'if', 'else', 'while', 'asm', 'return'}
+
+# ключевые слова (в верхний регистр тип)
+KEYWORDS = {
+    'int', 'print', 'if', 'else', 'while', 'asm', 'return',
+    'squad', 'dft'
+}
 
 class Token:
     def __init__(self, type_, val):
@@ -127,7 +171,7 @@ def lex(src):
     pos = 0
     tokens = []
     while pos < len(src):
-        # comments // to end of line
+        # // комментарии
         if src.startswith('//', pos):
             nl = src.find('\n', pos)
             if nl == -1:
@@ -138,44 +182,30 @@ def lex(src):
         m = TOK_REGEX.match(src, pos)
         if not m:
             raise SyntaxError(f"Lex error at {pos}")
-
         kind = m.lastgroup
         val = m.group(kind)
         pos = m.end()
 
         if kind == 'NUMBER':
-            # Поддержка целых и дробных чисел
-            if '.' in val:
-                try:
-                    tokens.append(Token('NUMBER', float(val)))
-                except ValueError:
-                    raise SyntaxError(f"Invalid float number '{val}'")
-            else:
-                try:
-                    tokens.append(Token('NUMBER', int(val)))
-                except ValueError:
-                    raise SyntaxError(f"Invalid integer number '{val}'")
-
+            v = float(val) if '.' in val else int(val)
+            tokens.append(Token('NUMBER', v))
+        elif kind == 'STRING':
+            tokens.append(Token('STRING', val[1:-1]))
         elif kind == 'ID':
             if val in KEYWORDS:
                 tokens.append(Token(val.upper(), val))
             else:
                 tokens.append(Token('ID', val))
-
-        elif kind in ('OP', 'SEMIC', 'COMMA', 'LBRACE', 'RBRACE', 'LPAREN', 'RPAREN', 'COLON'):
+        elif kind in ('DOT','OP','SEMIC','COMMA','LBRACE','RBRACE','LPAREN','RPAREN','COLON'):
             tokens.append(Token(kind, val))
-
-        elif kind in ('NEWLINE', 'SKIP'):
+        elif kind in ('NEWLINE','SKIP'):
             pass
-
         elif kind == 'MISMATCH':
             raise SyntaxError(f"Unexpected char {val}")
-
-    tokens.append(Token('EOF', ''))
+    tokens.append(Token('EOF',''))
     return tokens
- 
 
-# ---------- Parser ----------
+# ---------------- Parser ----------------
 class Parser:
     CMD_WORDS = {'window','camera','object','move','rotate','render'}
 
@@ -183,14 +213,12 @@ class Parser:
         self.toks = tokens
         self.i = 0
 
-    def peek(self):
-        return self.toks[self.i]
-
+    def peek(self): return self.toks[self.i]
+    def peekn(self, n): 
+        j = self.i + n
+        return self.toks[j] if j < len(self.toks) else Token('EOF','')
     def next(self):
-        t = self.toks[self.i]
-        self.i += 1
-        return t
-
+        t = self.toks[self.i]; self.i += 1; return t
     def expect(self, kind, val=None):
         t = self.peek()
         if t.type != kind and t.val != kind:
@@ -202,15 +230,62 @@ class Parser:
     def parse(self):
         stmts = []
         while self.peek().type != 'EOF':
-            stmts.append(self.parse_stmt())
+            stmts.append(self.parse_toplevel())
         return ('prog', stmts)
+
+    def parse_toplevel(self):
+        t = self.peek()
+        if t.type == 'SQUAD':
+            return self.parse_squad()
+        if t.type == 'DFT':
+            return self.parse_function_def()
+        return self.parse_stmt()
+
+    # squad Name { members... }
+    def parse_squad(self):
+        self.expect('SQUAD')
+        name = self.expect('ID').val
+        self.expect('LBRACE')
+        fields = []   # list of ('decl', name, exprOrNone)
+        methods = []  # list of function ASTs
+        while self.peek().type != 'RBRACE':
+            if self.peek().type == 'INT':
+                fields.append(self.parse_decl())
+            elif self.peek().type == 'DFT':
+                methods.append(self.parse_function_def(in_class=True))
+            else:
+                raise SyntaxError("Only int fields and dft methods allowed inside squad")
+        self.expect('RBRACE')
+        return ('squad', name, fields, methods)
+
+    # dft name (params) { block }
+    def parse_function_def(self, in_class=False):
+        self.expect('DFT')
+        fname = self.expect('ID').val
+        self.expect('LPAREN')
+        params = []
+        if self.peek().type != 'RPAREN':
+            while True:
+                p = self.expect('ID').val
+                params.append(p)
+                if self.peek().type == 'COMMA':
+                    self.next()
+                    continue
+                break
+        self.expect('RPAREN')
+        body = self.parse_block()
+        return ('funcdef', fname, params, body, in_class)
 
     def parse_stmt(self):
         t = self.peek()
 
-        # декларации / print / if / while / asm
+        # 3D команды
+        if t.type == 'ID' and t.val in self.CMD_WORDS:
+            return self.parse_command()
+
         if t.type == 'INT':
             return self.parse_decl()
+
         if t.type == 'PRINT':
             self.next()
             self.expect('LPAREN')
@@ -218,43 +293,61 @@ class Parser:
             self.expect('RPAREN')
             self.expect('SEMIC')
             return ('print', expr)
+
         if t.type == 'IF':
             self.next()
-            self.expect('LPAREN')
-            cond = self.parse_expr()
-            self.expect('RPAREN')
+            self.expect('LPAREN'); cond = self.parse_expr(); self.expect('RPAREN')
             thenb = self.parse_block()
             elseb = None
             if self.peek().type == 'ELSE':
                 self.next()
                 elseb = self.parse_block()
             return ('if', cond, thenb, elseb)
+
         if t.type == 'WHILE':
             self.next()
-            self.expect('LPAREN')
-            cond = self.parse_expr()
-            self.expect('RPAREN')
+            self.expect('LPAREN'); cond = self.parse_expr(); self.expect('RPAREN')
             body = self.parse_block()
             return ('while', cond, body)
+
         if t.type == 'ASM':
             return self.parse_asm_block()
 
-        # наши 3D-команды — это ID, не входящие в KEYWORDS
-        if t.type == 'ID' and t.val in self.CMD_WORDS:
-            return self.parse_command()
-
-        # присваивание
-        if t.type == 'ID':
-            # lookahead for '='
-            name = t.val
+        if t.type == 'RETURN':
             self.next()
+            # return без значения разрешим, тогда вернёт 0
+            if self.peek().type == 'SEMIC':
+                self.next()
+                return ('return', None)
+            expr = self.parse_expr()
+            self.expect('SEMIC')
+            return ('return', expr)
+
+        # Объявление объекта: ClassName varname;
+        if t.type == 'ID' and self.peekn(1).type == 'ID' and self.peekn(2).type == 'SEMIC':
+            class_name = self.next().val
+            var_name = self.next().val
+            self.expect('SEMIC')
+            return ('declobj', class_name, var_name)
+
+        # Присваивание / вызов / методвызов
+        if t.type == 'ID':
+            # Считаем до ';' и определяем форму
+            # Возможные формы:
+            #   a = expr;
+            #   a.b = expr;
+            #   func(args);
+            #   obj.method(args);
+            left = self.parse_postfix()  # var / var.field / func(...) / obj.method(...)
             if self.peek().type == 'OP' and self.peek().val == '=':
+                # присваивание в var или obj.field
                 self.next()
                 expr = self.parse_expr()
                 self.expect('SEMIC')
-                return ('assign', name, expr)
-            else:
-                raise SyntaxError("Only assignments or commands allowed when starting with identifier")
+                return ('assign_any', left, expr)
+            # иначе это вызов без использования результата
+            self.expect('SEMIC')
+            return ('evalstmt', left)
 
         if t.type == 'LBRACE':
             return self.parse_block()
@@ -262,7 +355,6 @@ class Parser:
         raise SyntaxError(f"Unexpected token {t}")
 
     def parse_decl(self):
-        # int x = expr;
         self.expect('INT')
         t = self.expect('ID')
         name = t.val
@@ -283,10 +375,8 @@ class Parser:
         self.expect('RBRACE')
         return ('block', stmts)
 
-    # parse inline assembly block (raw text until matching '}')
     def parse_asm_block(self):
-        self.expect('ASM')
-        self.expect('LBRACE')
+        self.expect('ASM'); self.expect('LBRACE')
         asm_tokens = []
         depth = 1
         while depth > 0:
@@ -297,34 +387,16 @@ class Parser:
                 depth += 1
             elif tok.type == 'RBRACE':
                 depth -= 1
-                if depth == 0:
-                    break
+                if depth == 0: break
             asm_tokens.append(tok)
         pieces = []
         for tk in asm_tokens:
-            pieces.append(tk.val)
-            pieces.append(' ')
+            pieces.append(str(tk.val)); pieces.append(' ')
         asm_text = ''.join(pieces).strip()
         return ('asm', asm_text)
 
-    # Простая команда: собираем аргументы до ';'
-    def parse_command(self):
-        name = self.expect('ID').val  # window|camera|object|move|rotate|render
-        args = []
-        while self.peek().type not in ('SEMIC', 'EOF'):
-            tk = self.peek()
-            if tk.type in ('NUMBER', 'ID'):
-                args.append(self.next().val)
-            else:
-                # пропускаем разделители/прочее
-                self.next()
-        if self.peek().type == 'SEMIC':
-            self.next()
-        return ('command', name, args)
-
-    # Expression parser (минимальная версия)
+    # --- выражения и постфиксы (вызовы/точка) ---
     def parse_expr(self):
-        # из исходника — полная иерархия приоритетов; оставим как было
         return self.parse_or()
 
     def parse_or(self):
@@ -380,16 +452,16 @@ class Parser:
             self.next()
             node = self.parse_unary()
             return ('unary', '-', node)
-        return self.parse_primary()
+        return self.parse_postfix()
 
     def parse_primary(self):
         t = self.peek()
         if t.type == 'NUMBER':
-            self.next()
-            return ('number', t.val)
+            self.next(); return ('number', t.val)
+        if t.type == 'STRING':
+            self.next(); return ('string', t.val)
         if t.type == 'ID':
-            self.next()
-            return ('var', t.val)
+            self.next(); return ('var', t.val)
         if t.type == 'LPAREN':
             self.next()
             node = self.parse_expr()
@@ -397,58 +469,228 @@ class Parser:
             return node
         raise SyntaxError(f"Unexpected in expr: {t}")
 
-# ---------- Interpreter ----------
+    def parse_postfix(self):
+        node = self.parse_primary()
+        while True:
+            if self.peek().type == 'LPAREN':
+                # вызов функции/метода: node(args)
+                self.next()
+                args = []
+                if self.peek().type != 'RPAREN':
+                    while True:
+                        args.append(self.parse_expr())
+                        if self.peek().type == 'COMMA':
+                            self.next(); continue
+                        break
+                self.expect('RPAREN')
+                node = ('call', node, args)
+                continue
+            if self.peek().type == 'DOT':
+                self.next()
+                attr = self.expect('ID').val
+                node = ('getattr', node, attr)
+                continue
+            break
+        return node
+
+    def parse_command(self):
+        name = self.expect('ID').val
+        args = []
+        while self.peek().type not in ('SEMIC','EOF'):
+            tk = self.peek()
+            if tk.type in ('NUMBER','ID','STRING'):
+                args.append(self.next().val)
+            else:
+                self.next()
+        if self.peek().type == 'SEMIC':
+            self.next()
+        return ('command', name, args)
+
+# ---------------- Runtime / Interpreter ----------------
+class ReturnSignal(Exception):
+    def __init__(self, value):
+        self.value = value
+
 class Env:
     def __init__(self):
-        self.vars = {}  # name -> int
+        self.vars = {}      # глобальные переменные
+        self.funcs = {}     # имя -> (params, body)
+        self.classes = {}   # имя -> {'fields': [(name, defaultNodeOrNone)...], 'methods': {name:(params, body)}}
+
     def declare(self, name, val=0):
         self.vars[name] = val
+
     def set(self, name, val):
-        if name not in self.vars:
-            self.vars[name] = val
-        else:
-            self.vars[name] = val
+        self.vars[name] = val
+
     def get(self, name):
-        if name not in self.vars:
-            raise NameError(f"Undefined variable '{name}'")
-        return self.vars[name]
+        # 1. локальные/глобальные переменные
+        if name in self.vars:
+            return self.vars[name]
+
+        # 2. если внутри метода — ищем в self.fields
+        if 'self' in self.vars:
+            self_obj = self.vars['self']
+            if isinstance(self_obj, dict) and '__class__' in self_obj and 'fields' in self_obj:
+                if name in self_obj['fields']:
+                    return self_obj['fields'][name]
+
+        # 3. иначе — ошибка
+        raise NameError(f"Undefined variable '{name}'")
+
+
+def as_number(v):
+    if isinstance(v, (int, float)): return v
+    raise RuntimeError(f"Expected number, got {type(v).__name__}")
+
+def is_instance(obj): return isinstance(obj, dict) and '__class__' in obj and 'fields' in obj
 
 def eval_expr(node, env):
     typ = node[0]
+
+    # ------------------- литералы -------------------
     if typ == 'number':
         return node[1]
+    if typ == 'string':
+        return node[1]
+
+    # ------------------- переменные -------------------
     if typ == 'var':
-        return env.get(node[1])
+        name = node[1]
+        return env.get(name)
+
+    # ------------------- доступ к полю -------------------
+    if typ == 'getattr':
+        obj = eval_expr(node[1], env)
+        attr = node[2]
+        if not (isinstance(obj, dict) and '__class__' in obj and 'fields' in obj):
+            raise RuntimeError("Attribute access on non-object")
+        if attr not in obj['fields']:
+            raise RuntimeError(f"Unknown field '{attr}' in object of class '{obj.get('__class__', '?')}'")
+        return obj['fields'][attr]
+
+    # ------------------- вызов функции -------------------
+    if typ == 'call':
+        callee = node[1]
+        args_nodes = node[2]
+
+        # глобальная функция
+        if callee[0] == 'var':
+            fname = callee[1]
+            arg_vals = [eval_expr(a, env) for a in args_nodes]
+            return call_function(fname, arg_vals, env, self_obj=None)
+
+        # метод объекта
+        elif callee[0] == 'getattr':
+            obj = eval_expr(callee[1], env)
+            mname = callee[2]
+            if not (isinstance(obj, dict) and '__class__' in obj and 'fields' in obj):
+                raise RuntimeError("Method call on non-object")
+            arg_vals = [eval_expr(a, env) for a in args_nodes]
+            return call_method(obj, mname, arg_vals, env)
+
+        else:
+            raise RuntimeError("Unsupported function call target")
+
+    # ------------------- унарные операции -------------------
     if typ == 'unary':
         op = node[1]
         v = eval_expr(node[2], env)
-        if op == '-':
-            return -v
+        if not isinstance(v, (int, float)):
+            raise RuntimeError("Unary operator on non-number")
+        return -v if op == '-' else v
+
+    # ------------------- бинарные операции -------------------
     if typ == 'binop':
-        op = node[1]; a = eval_expr(node[2], env); b = eval_expr(node[3], env)
-        if op == '+': return a + b
-        if op == '-': return a - b
-        if op == '*': return a * b
-        if op == '/': return a // b if b != 0 else 0
-        if op == '%': return a % b
+        op, aN, bN = node[1], node[2], node[3]
+        a = eval_expr(aN, env)
+        b = eval_expr(bN, env)
+
+        def num(x): return x if isinstance(x, (int, float)) else 0
+
+        if op == '+': return num(a) + num(b)
+        if op == '-': return num(a) - num(b)
+        if op == '*': return num(a) * num(b)
+        if op == '/': return num(a) / num(b) if b != 0 else 0
+        if op == '%': return num(a) % num(b)
         if op == '==': return 1 if a == b else 0
         if op == '!=': return 1 if a != b else 0
-        if op == '<': return 1 if a < b else 0
-        if op == '<=': return 1 if a <= b else 0
-        if op == '>': return 1 if a > b else 0
-        if op == '>=': return 1 if a >= b else 0
+        if op == '<':  return 1 if num(a) < num(b) else 0
+        if op == '<=': return 1 if num(a) <= num(b) else 0
+        if op == '>':  return 1 if num(a) > num(b) else 0
+        if op == '>=': return 1 if num(a) >= num(b) else 0
         if op == '&&': return 1 if (a and b) else 0
         if op == '||': return 1 if (a or b) else 0
+
     raise RuntimeError(f"Unknown expr node {node}")
 
-# assembly emulator
+def call_function(fname, arg_vals, env, self_obj):
+    if fname not in env.funcs:
+        raise RuntimeError(f"Unknown function '{fname}'")
+    params, body = env.funcs[fname]
+    # псевдо-локальные переменные: сохраняем старые значения/наличие
+    saved = {}
+    created = []
+    try:
+        # self для глобальных функций не задаём, но если нужно — можно использовать имя 'self'
+        for p, v in zip(params, arg_vals):
+            if p in env.vars:
+                saved[p] = env.vars[p]
+            else:
+                created.append(p)
+            env.vars[p] = v
+        # исполняем тело и ловим return
+        try:
+            exec_stmt(body, env, lambda s: None)
+        except ReturnSignal as rs:
+            return rs.value if rs.value is not None else 0
+        return 0
+    finally:
+        for p in created:
+            env.vars.pop(p, None)
+        for p,v in saved.items():
+            env.vars[p] = v
+
+def call_method(obj, mname, arg_vals, env):
+    cls = obj['__class__']
+    cdef = env.classes.get(cls)
+    if not cdef or mname not in cdef['methods']:
+        raise RuntimeError(f"Unknown method {cls}.{mname}")
+    params, body = cdef['methods'][mname]
+    saved = {}
+    created = []
+    try:
+        # кладём self
+        if 'self' in env.vars:
+            saved['self'] = env.vars['self']
+        else:
+            created.append('self')
+        env.vars['self'] = obj
+        for p, v in zip(params, arg_vals):
+            if p in env.vars:
+                saved[p] = env.vars[p]
+            else:
+                created.append(p)
+            env.vars[p] = v
+        try:
+            exec_stmt(body, env, lambda s: None)
+        except ReturnSignal as rs:
+            return rs.value if rs.value is not None else 0
+        return 0
+    finally:
+        for p in created:
+            env.vars.pop(p, None)
+        for p,v in saved.items():
+            env.vars[p] = v
+
+# ---------------- Assembly emulator (как раньше) ----------------
 class AsmEmu:
     def __init__(self, env):
         self.regs = {f"r{i}":0 for i in range(8)}
         self.env = env
         self.zero = False
         self.labels = {}
-        self.instructions = []  # list of lines
+        self.instructions = []
         self.ip = 0
 
     def parse_lines(self, text):
@@ -456,11 +698,10 @@ class AsmEmu:
         parts = re.split(r';|\n', text)
         for p in parts:
             line = p.strip()
-            if not line:
-                continue
+            if not line: continue
             raw_lines.append(line)
         self.instructions = []
-        for idx, line in enumerate(raw_lines):
+        for line in raw_lines:
             if line.endswith(':'):
                 lbl = line[:-1].strip()
                 self.labels[lbl] = len(self.instructions)
@@ -488,167 +729,207 @@ class AsmEmu:
             parts = [p.strip() for p in re.split(r'[ ,]+', line) if p.strip()!='']
             op = parts[0].upper()
             if op == 'MOV':
-                dst = parts[1]; src = parts[2]
+                dst, src = parts[1], parts[2]
                 val = self.get_val(src)
-                if dst in self.regs:
-                    self.set_reg(dst, val)
-                else:
-                    self.env.set(dst, val)
+                if dst in self.regs: self.set_reg(dst, val)
+                else: self.env.set(dst, val)
                 self.ip += 1
             elif op == 'ADD':
-                dst = parts[1]; src = parts[2]
-                x = self.get_val(dst)
-                y = self.get_val(src)
-                if dst in self.regs:
-                    self.set_reg(dst, x + y)
-                else:
-                    self.env.set(dst, x + y)
+                dst, src = parts[1], parts[2]
+                x = self.get_val(dst); y = self.get_val(src)
+                if dst in self.regs: self.set_reg(dst, x+y)
+                else: self.env.set(dst, x+y)
                 self.ip += 1
             elif op == 'SUB':
-                dst = parts[1]; src = parts[2]
+                dst, src = parts[1], parts[2]
                 x = self.get_val(dst); y = self.get_val(src)
-                if dst in self.regs:
-                    self.set_reg(dst, x - y)
-                else:
-                    self.env.set(dst, x - y)
+                if dst in self.regs: self.set_reg(dst, x-y)
+                else: self.env.set(dst, x-y)
                 self.ip += 1
             elif op == 'INC':
-                r = parts[1]
-                self.set_reg(r, self.get_val(r) + 1)
-                self.ip += 1
+                r = parts[1]; self.set_reg(r, self.get_val(r)+1); self.ip += 1
             elif op == 'DEC':
-                r = parts[1]
-                self.set_reg(r, self.get_val(r) - 1)
-                self.ip += 1
+                r = parts[1]; self.set_reg(r, self.get_val(r)-1); self.ip += 1
             elif op == 'CMP':
                 a = self.get_val(parts[1]); b = self.get_val(parts[2])
-                self.zero = (a == b)
-                self.ip += 1
+                self.zero = (a == b); self.ip += 1
             elif op == 'JMP':
                 lbl = parts[1]
-                if lbl not in self.labels:
-                    raise RuntimeError(f"Unknown label {lbl}")
+                if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
                 self.ip = self.labels[lbl]
             elif op == 'JE':
                 lbl = parts[1]
                 if self.zero:
-                    if lbl not in self.labels:
-                        raise RuntimeError(f"Unknown label {lbl}")
+                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
                     self.ip = self.labels[lbl]
                 else:
                     self.ip += 1
             elif op == 'JNE':
                 lbl = parts[1]
                 if not self.zero:
-                    if lbl not in self.labels:
-                        raise RuntimeError(f"Unknown label {lbl}")
+                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
                     self.ip = self.labels[lbl]
                 else:
                     self.ip += 1
             elif op == 'LOAD':
-                reg = parts[1]; var = parts[2]
+                reg, var = parts[1], parts[2]
                 val = self.env.get(var)
-                self.set_reg(reg, val)
-                self.ip += 1
+                self.set_reg(reg, val); self.ip += 1
             elif op == 'STORE':
-                var = parts[1]; reg = parts[2]
-                self.env.set(var, self.get_val(reg))
-                self.ip += 1
+                var, reg = parts[1], parts[2]
+                self.env.set(var, self.get_val(reg)); self.ip += 1
             else:
                 raise RuntimeError(f"Unknown asm op: {op}")
             steps += 1
             if steps > 10000:
                 raise RuntimeError("Asm: too many steps (possible infinite loop)")
 
-# Run program
+# ---------------- Program execution ----------------
 def run_program(src, output_callback):
     toks = lex(src)
     p = Parser(toks)
     tree = p.parse()
     env = Env()
-    for stmt in tree[1]:
-        exec_stmt(stmt, env, output_callback)
+
+    # первый проход: зарегистрировать сквады (классы) и глобальные функции
+    for node in tree[1]:
+        if node[0] == 'squad':
+            cname = node[1]
+            fields_ast = node[2]
+            methods_ast = node[3]
+            # сохранить поля (имена и их default AST)
+            fields = []
+            for f in fields_ast:
+                # ('decl', name, valOrNone)
+                fields.append( (f[1], f[2]) )
+            methods = {}
+            for m in methods_ast:
+                # ('funcdef', fname, params, body, in_class=True)
+                mname, params, body = m[1], m[2], m[3]
+                methods[mname] = (params, body)
+            env.classes[cname] = {'fields': fields, 'methods': methods}
+
+        if node[0] == 'funcdef' and not node[4]:
+            # глобальная функция
+            fname, params, body = node[1], node[2], node[3]
+            env.funcs[fname] = (params, body)
+
+    # второй проход: выполнить остальное
+    for node in tree[1]:
+        if node[0] in ('squad','funcdef') and (node[0]=='squad' or node[4]): 
+            # определение уже учтено — пропустить (методы внутри класса тоже)
+            continue
+        exec_stmt(node, env, output_callback)
+
+def make_instance(class_name, env):
+    cdef = env.classes.get(class_name)
+    if not cdef:
+        raise RuntimeError(f"Unknown class '{class_name}'")
+    inst = {'__class__': class_name, 'fields': {}}
+    # инициализировать поля по умолчанию
+    for fname, default_ast in cdef['fields']:
+        inst['fields'][fname] = eval_expr(default_ast, env) if default_ast is not None else 0
+    return inst
+
+def assign_to_lvalue(lv, value, env):
+    # lv может быть ('var',name) или ('getattr', objExpr, field)
+    if lv[0] == 'var':
+        env.set(lv[1], value)
+        return
+    if lv[0] == 'getattr':
+        obj = eval_expr(lv[1], env)
+        field = lv[2]
+        if not is_instance(obj):
+            raise RuntimeError("Assign to attribute of non-object")
+        obj['fields'][field] = value
+        return
+    raise RuntimeError("Unsupported lvalue")
 
 def exec_stmt(stmt, env, output_callback):
     typ = stmt[0]
+
     if typ == 'decl':
-        name = stmt[1]
-        val_node = stmt[2]
-        if val_node is None:
-            env.declare(name, 0)
-        else:
-            v = eval_expr(val_node, env)
-            env.declare(name, v)
+        name, val_node = stmt[1], stmt[2]
+        v = eval_expr(val_node, env) if val_node is not None else 0
+        env.declare(name, v)
+        return
 
-    elif typ == 'assign':
-        name = stmt[1]
-        v = eval_expr(stmt[2], env)
-        env.set(name, v)
+    if typ == 'declobj':
+        class_name, var_name = stmt[1], stmt[2]
+        inst = make_instance(class_name, env)
+        env.declare(var_name, inst)
+        return
 
-    elif typ == 'print':
+    if typ == 'assign_any':
+        lv, expr = stmt[1], stmt[2]
+        v = eval_expr(expr, env)
+        assign_to_lvalue(lv, v, env)
+        return
+
+    if typ == 'evalstmt':
+        # выражение-стейтмент: вызов функции/метода и т.п.
+        _ = eval_expr(stmt[1], env)
+        return
+
+    if typ == 'print':
         v = eval_expr(stmt[1], env)
         output_callback(str(v))
+        return
 
-    elif typ == 'block':
+    if typ == 'block':
         for s in stmt[1]:
             exec_stmt(s, env, output_callback)
+        return
 
-    elif typ == 'if':
+    if typ == 'if':
         cond = eval_expr(stmt[1], env)
-        if cond:
-            exec_stmt(stmt[2], env, output_callback)
-        elif stmt[3] is not None:
-            exec_stmt(stmt[3], env, output_callback)
+        if cond: exec_stmt(stmt[2], env, output_callback)
+        elif stmt[3] is not None: exec_stmt(stmt[3], env, output_callback)
+        return
 
-    elif typ == 'while':
+    if typ == 'while':
         while eval_expr(stmt[1], env):
             exec_stmt(stmt[2], env, output_callback)
+        return
 
-    elif typ == 'asm':
+    if typ == 'return':
+        if stmt[1] is None:
+            raise ReturnSignal(0)
+        raise ReturnSignal(eval_expr(stmt[1], env))
+
+    if typ == 'asm':
         asm_text = stmt[1]
         emu = AsmEmu(env)
         emu.parse_lines(asm_text)
         emu.exec_all()
+        return
 
-    elif typ == 'command':
+    if typ == 'command':
         name, args = stmt[1], stmt[2]
-
         if name == 'window':
-            # window <w> <h> <title_id>;
-            w = int(args[0]) if len(args) > 0 else 800
-            h = int(args[1]) if len(args) > 1 else 600
-            title = args[2] if len(args) > 2 else "CAsm3D"
+            w = args[0] if len(args)>0 else 800
+            h = args[1] if len(args)>1 else 600
+            title = args[2] if len(args)>2 else "CAsm3D"
             ENGINE.window(w, h, title)
-
-        elif name == 'camera':
-            # camera <x> <y> <z>;
+            return
+        if name == 'camera':
             if len(args) < 3: raise RuntimeError("camera needs 3 args")
-            ENGINE.set_camera(args[0], args[1], args[2])
-
-        elif name == 'object':
-            # object <type> <name> <x> <y> <z> <size> <color_id>;
+            ENGINE.set_camera(args[0], args[1], args[2]); return
+        if name == 'object':
             if len(args) < 7: raise RuntimeError("object needs 7 args")
-            ENGINE.add_object(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
-
-        elif name == 'move':
-            # move <name> <dx> <dy> <dz>;
+            ENGINE.add_object(args[0], args[1], args[2], args[3], args[4], args[5], args[6]); return
+        if name == 'move':
             if len(args) < 4: raise RuntimeError("move needs 4 args")
-            ENGINE.move_object(args[0], args[1], args[2], args[3])
+            ENGINE.move_object(args[0], args[1], args[2], args[3]); return
+        if name == 'rotate':
+            if len(args) < 4: raise RuntimeError("rotate needs 4 args: name rx ry rz")
+            ENGINE.rotate_object(args[0], args[1], args[2], args[3]); return
+        if name == 'render':
+            ENGINE.render(); return
+        raise RuntimeError(f"Unknown command {name}")
 
-        elif name == 'rotate':
-            # rotate <name> <rx> <ry> <rz>;
-            if len(args) < 3: raise RuntimeError("rotate needs 3 args")
-            obj_name = args[0]
-            rx = args[1] if len(args) > 1 else 0
-            ry = args[2] if len(args) > 2 else 0
-            rz = args[3] if len(args) > 3 else 0
-            ENGINE.rotate_object(obj_name, rx, ry, rz)
+    # игнорируем уже обработанные на первом проходе:
+    if typ in ('squad','funcdef'):
+        return
 
-        elif name == 'render':
-            ENGINE.render()
-
-        else:
-            raise RuntimeError(f"Unknown command {name}")
-
-    else:
-        raise RuntimeError(f"Unknown stmt {typ}")
+    raise RuntimeError(f"Unknown stmt {typ}")
