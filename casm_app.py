@@ -1,4 +1,4 @@
- import tkinter as tk
+import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 from casm_lang import run_program, ENGINE
 import threading, re
@@ -139,3 +139,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     CAsmIDE(root)
     root.mainloop()
+
