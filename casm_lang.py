@@ -1,10 +1,12 @@
-# casm_lang.py — CAsm + squads/dft + мини-3D движок (tkinter)
-# Новые конструкции:
-#   squad Name { int a=1; dft m(p){ ... } }
-#   Name obj;                 // создать объект класса Name с дефолтными полями
-#   obj.field = expr;         // доступ к полям
-#   obj.method(arg1, arg2);   // вызов метода
-#   dft func(a,b){ return a+b; }  // глобальная функция
+# casm_lang.py — CAsm + squads/dft + мини-3D движок (tkinter) + box (lists)
+# Примеры:
+#   box a = [1,2,3];
+#   a.add(5);
+#   a[1] = 7;
+#   print(a);         // [1, 7, 3, 5]
+#   print(a.len());   // 4
+#   a.sort();
+#   print(a[0]);      // 1
 #
 # Совместимые команды 3D:
 #   window <w> <h> <title>;
@@ -139,8 +141,10 @@ TOKEN_SPEC = [
     ('STRING',   r'"[^"\n]*"'),
     ('NUMBER',   r'\d+(\.\d+)?'),
     ('DOT',      r'\.'),
+    ('LBRACK',   r'\['),
+    ('RBRACK',   r'\]'),
     ('ID',       r'[A-Za-z_][A-Za-z0-9_]*'),
-    ('OP',       r'==|!=|<=|>=|\|\||&&|\+|\-|\*|/|%|<|>|\=')
+    ('OP',       r'==|!=|<=|>=|\|\||&&|\+|\-|\*|/|%|<|>|\='),
     ('SEMIC',    r';'),
     ('COMMA',    r','),
     ('LBRACE',   r'\{'),
@@ -154,9 +158,8 @@ TOKEN_SPEC = [
 ]
 TOK_REGEX = re.compile('|'.join(f'(?P<{n}>{p})' for n, p in TOKEN_SPEC))
 
-# ключевые слова (в верхний регистр тип)
 KEYWORDS = {
-    'int', 'print', 'if', 'else', 'while', 'asm', 'return',
+    'int', 'box', 'print', 'if', 'else', 'while', 'asm', 'return',
     'squad', 'dft'
 }
 
@@ -171,7 +174,6 @@ def lex(src):
     pos = 0
     tokens = []
     while pos < len(src):
-        # // комментарии
         if src.startswith('//', pos):
             nl = src.find('\n', pos)
             if nl == -1:
@@ -196,7 +198,7 @@ def lex(src):
                 tokens.append(Token(val.upper(), val))
             else:
                 tokens.append(Token('ID', val))
-        elif kind in ('DOT','OP','SEMIC','COMMA','LBRACE','RBRACE','LPAREN','RPAREN','COLON'):
+        elif kind in ('DOT','OP','SEMIC','COMMA','LBRACE','RBRACE','LPAREN','RPAREN','COLON','LBRACK','RBRACK'):
             tokens.append(Token(kind, val))
         elif kind in ('NEWLINE','SKIP'):
             pass
@@ -214,7 +216,7 @@ class Parser:
         self.i = 0
 
     def peek(self): return self.toks[self.i]
-    def peekn(self, n): 
+    def peekn(self, n):
         j = self.i + n
         return self.toks[j] if j < len(self.toks) else Token('EOF','')
     def next(self):
@@ -241,13 +243,12 @@ class Parser:
             return self.parse_function_def()
         return self.parse_stmt()
 
-    # squad Name { members... }
     def parse_squad(self):
         self.expect('SQUAD')
         name = self.expect('ID').val
         self.expect('LBRACE')
-        fields = []   # list of ('decl', name, exprOrNone)
-        methods = []  # list of function ASTs
+        fields = []
+        methods = []
         while self.peek().type != 'RBRACE':
             if self.peek().type == 'INT':
                 fields.append(self.parse_decl())
@@ -258,7 +259,6 @@ class Parser:
         self.expect('RBRACE')
         return ('squad', name, fields, methods)
 
-    # dft name (params) { block }
     def parse_function_def(self, in_class=False):
         self.expect('DFT')
         fname = self.expect('ID').val
@@ -279,11 +279,10 @@ class Parser:
     def parse_stmt(self):
         t = self.peek()
 
-        # 3D команды
         if t.type == 'ID' and t.val in self.CMD_WORDS:
             return self.parse_command()
 
-        if t.type == 'INT':
+        if t.type == 'INT' or t.type == 'BOX':
             return self.parse_decl()
 
         if t.type == 'PRINT':
@@ -315,7 +314,6 @@ class Parser:
 
         if t.type == 'RETURN':
             self.next()
-            # return без значения разрешим, тогда вернёт 0
             if self.peek().type == 'SEMIC':
                 self.next()
                 return ('return', None)
@@ -323,29 +321,19 @@ class Parser:
             self.expect('SEMIC')
             return ('return', expr)
 
-        # Объявление объекта: ClassName varname;
         if t.type == 'ID' and self.peekn(1).type == 'ID' and self.peekn(2).type == 'SEMIC':
             class_name = self.next().val
             var_name = self.next().val
             self.expect('SEMIC')
             return ('declobj', class_name, var_name)
 
-        # Присваивание / вызов / методвызов
         if t.type == 'ID':
-            # Считаем до ';' и определяем форму
-            # Возможные формы:
-            #   a = expr;
-            #   a.b = expr;
-            #   func(args);
-            #   obj.method(args);
-            left = self.parse_postfix()  # var / var.field / func(...) / obj.method(...)
+            left = self.parse_postfix()
             if self.peek().type == 'OP' and self.peek().val == '=':
-                # присваивание в var или obj.field
                 self.next()
                 expr = self.parse_expr()
                 self.expect('SEMIC')
                 return ('assign_any', left, expr)
-            # иначе это вызов без использования результата
             self.expect('SEMIC')
             return ('evalstmt', left)
 
@@ -355,7 +343,10 @@ class Parser:
         raise SyntaxError(f"Unexpected token {t}")
 
     def parse_decl(self):
-        self.expect('INT')
+        if self.peek().type == 'INT':
+            self.expect('INT'); dtype = 'int'
+        else:
+            self.expect('BOX'); dtype = 'box'
         t = self.expect('ID')
         name = t.val
         val = None
@@ -363,7 +354,7 @@ class Parser:
             self.next()
             val = self.parse_expr()
         self.expect('SEMIC')
-        return ('decl', name, val)
+        return ('decl', name, val if dtype == 'box' else val)
 
     def parse_block(self):
         self.expect('LBRACE')
@@ -395,7 +386,7 @@ class Parser:
         asm_text = ''.join(pieces).strip()
         return ('asm', asm_text)
 
-    # --- выражения и постфиксы (вызовы/точка) ---
+    # --- выражения ---
     def parse_expr(self):
         return self.parse_or()
 
@@ -454,6 +445,18 @@ class Parser:
             return ('unary', '-', node)
         return self.parse_postfix()
 
+    def parse_list_literal(self):
+        self.expect('LBRACK')
+        items = []
+        if self.peek().type != 'RBRACK':
+            while True:
+                items.append(self.parse_expr())
+                if self.peek().type == 'COMMA':
+                    self.next(); continue
+                break
+        self.expect('RBRACK')
+        return ('list', items)
+
     def parse_primary(self):
         t = self.peek()
         if t.type == 'NUMBER':
@@ -467,13 +470,14 @@ class Parser:
             node = self.parse_expr()
             self.expect('RPAREN')
             return node
+        if t.type == 'LBRACK':
+            return self.parse_list_literal()
         raise SyntaxError(f"Unexpected in expr: {t}")
 
     def parse_postfix(self):
         node = self.parse_primary()
         while True:
             if self.peek().type == 'LPAREN':
-                # вызов функции/метода: node(args)
                 self.next()
                 args = []
                 if self.peek().type != 'RPAREN':
@@ -489,6 +493,12 @@ class Parser:
                 self.next()
                 attr = self.expect('ID').val
                 node = ('getattr', node, attr)
+                continue
+            if self.peek().type == 'LBRACK':
+                self.next()
+                idx = self.parse_expr()
+                self.expect('RBRACK')
+                node = ('index', node, idx)
                 continue
             break
         return node
@@ -513,9 +523,9 @@ class ReturnSignal(Exception):
 
 class Env:
     def __init__(self):
-        self.vars = {}      # глобальные переменные
-        self.funcs = {}     # имя -> (params, body)
-        self.classes = {}   # имя -> {'fields': [(name, defaultNodeOrNone)...], 'methods': {name:(params, body)}}
+        self.vars = {}
+        self.funcs = {}
+        self.classes = {}
 
     def declare(self, name, val=0):
         self.vars[name] = val
@@ -524,83 +534,110 @@ class Env:
         self.vars[name] = val
 
     def get(self, name):
-        # 1. локальные/глобальные переменные
         if name in self.vars:
             return self.vars[name]
-
-        # 2. если внутри метода — ищем в self.fields
         if 'self' in self.vars:
             self_obj = self.vars['self']
             if isinstance(self_obj, dict) and '__class__' in self_obj and 'fields' in self_obj:
                 if name in self_obj['fields']:
                     return self_obj['fields'][name]
-
-        # 3. иначе — ошибка
         raise NameError(f"Undefined variable '{name}'")
 
+def is_instance(obj):
+    return isinstance(obj, dict) and '__class__' in obj and 'fields' in obj
 
-def as_number(v):
-    if isinstance(v, (int, float)): return v
-    raise RuntimeError(f"Expected number, got {type(v).__name__}")
-
-def is_instance(obj): return isinstance(obj, dict) and '__class__' in obj and 'fields' in obj
+def as_int(v):
+    if isinstance(v, (int, float)):
+        return int(v)
+    raise RuntimeError("Expected integer index")
 
 def eval_expr(node, env):
     typ = node[0]
 
-    # ------------------- литералы -------------------
     if typ == 'number':
         return node[1]
     if typ == 'string':
         return node[1]
+    if typ == 'list':
+        return [eval_expr(x, env) for x in node[1]]
 
-    # ------------------- переменные -------------------
     if typ == 'var':
-        name = node[1]
-        return env.get(name)
+        return env.get(node[1])
 
-    # ------------------- доступ к полю -------------------
     if typ == 'getattr':
         obj = eval_expr(node[1], env)
         attr = node[2]
-        if not (isinstance(obj, dict) and '__class__' in obj and 'fields' in obj):
-            raise RuntimeError("Attribute access on non-object")
-        if attr not in obj['fields']:
-            raise RuntimeError(f"Unknown field '{attr}' in object of class '{obj.get('__class__', '?')}'")
-        return obj['fields'][attr]
+        if is_instance(obj):
+            if attr not in obj['fields']:
+                raise RuntimeError(f"Unknown field '{attr}' in object of class '{obj.get('__class__','?')}'")
+            return obj['fields'][attr]
+        return ('attr_on_value', obj, attr)  # отдаём вверх для вызова метода
 
-    # ------------------- вызов функции -------------------
+    if typ == 'index':
+        seq = eval_expr(node[1], env)
+        idx = as_int(eval_expr(node[2], env))
+        if not isinstance(seq, list):
+            raise RuntimeError("Indexing works only on box (list)")
+        if idx < 0 or idx >= len(seq):
+            raise RuntimeError("Index out of range")
+        return seq[idx]
+
     if typ == 'call':
         callee = node[1]
         args_nodes = node[2]
 
-        # глобальная функция
         if callee[0] == 'var':
             fname = callee[1]
             arg_vals = [eval_expr(a, env) for a in args_nodes]
             return call_function(fname, arg_vals, env, self_obj=None)
 
-        # метод объекта
-        elif callee[0] == 'getattr':
-            obj = eval_expr(callee[1], env)
-            mname = callee[2]
-            if not (isinstance(obj, dict) and '__class__' in obj and 'fields' in obj):
-                raise RuntimeError("Method call on non-object")
-            arg_vals = [eval_expr(a, env) for a in args_nodes]
-            return call_method(obj, mname, arg_vals, env)
+        if callee[0] == 'getattr':
+            base = eval_expr(callee[1], env)
+            attr = callee[2]
+            argv = [eval_expr(a, env) for a in args_nodes]
 
-        else:
-            raise RuntimeError("Unsupported function call target")
+            if is_instance(base):
+                return call_method(base, attr, argv, env)
 
-    # ------------------- унарные операции -------------------
+            # методы box (списки)
+            if isinstance(base, list):
+                if attr == 'add':
+                    if len(argv) != 1: raise RuntimeError("box.add(x) needs 1 arg")
+                    base.append(argv[0]); return 0
+                if attr == 'pop':
+                    if len(argv) != 0: raise RuntimeError("box.pop() no args")
+                    if not base: return 0
+                    return base.pop()
+                if attr == 'len':
+                    if len(argv) != 0: raise RuntimeError("box.len() no args")
+                    return len(base)
+                if attr == 'clear':
+                    if len(argv) != 0: raise RuntimeError("box.clear() no args")
+                    base.clear(); return 0
+                if attr == 'sort':
+                    if len(argv) != 0: raise RuntimeError("box.sort() no args")
+                    try:
+                        base.sort()
+                    except Exception:
+                        # попробуем как строки
+                        base.sort(key=lambda x: str(x))
+                    return 0
+                raise RuntimeError(f"Unknown box method '{attr}'")
+            # строковые методы? пока не надо
+            raise RuntimeError("Method call on non-object/non-box")
+
+        if callee[0] == 'attr_on_value':
+            # теоретически не должно сюда дойти (перехватываем выше)
+            raise RuntimeError("Invalid call target")
+
+        raise RuntimeError("Unsupported function call target")
+
     if typ == 'unary':
-        op = node[1]
         v = eval_expr(node[2], env)
         if not isinstance(v, (int, float)):
             raise RuntimeError("Unary operator on non-number")
-        return -v if op == '-' else v
+        return -v
 
-    # ------------------- бинарные операции -------------------
     if typ == 'binop':
         op, aN, bN = node[1], node[2], node[3]
         a = eval_expr(aN, env)
@@ -628,18 +665,15 @@ def call_function(fname, arg_vals, env, self_obj):
     if fname not in env.funcs:
         raise RuntimeError(f"Unknown function '{fname}'")
     params, body = env.funcs[fname]
-    # псевдо-локальные переменные: сохраняем старые значения/наличие
     saved = {}
     created = []
     try:
-        # self для глобальных функций не задаём, но если нужно — можно использовать имя 'self'
         for p, v in zip(params, arg_vals):
             if p in env.vars:
                 saved[p] = env.vars[p]
             else:
                 created.append(p)
             env.vars[p] = v
-        # исполняем тело и ловим return
         try:
             exec_stmt(body, env, lambda s: None)
         except ReturnSignal as rs:
@@ -660,7 +694,6 @@ def call_method(obj, mname, arg_vals, env):
     saved = {}
     created = []
     try:
-        # кладём self
         if 'self' in env.vars:
             saved['self'] = env.vars['self']
         else:
@@ -683,14 +716,10 @@ def call_method(obj, mname, arg_vals, env):
         for p,v in saved.items():
             env.vars[p] = v
 
-# ---------------- Assembly emulator (как раньше) ----------------
 # ---------------- Assembly emulator ----------------
-# ---------------- Assembly emulator ----------------
-import re, random
-
 class AsmEmu:
     def __init__(self, env):
-        self.regs = {f"r{i}": 0 for i in range(8)}
+        self.regs = {f"r{i}":0 for i in range(8)}
         self.env = env
         self.zero = False
         self.labels = {}
@@ -698,40 +727,18 @@ class AsmEmu:
         self.ip = 0
 
     def parse_lines(self, text):
-        """
-        Разбивает ASM-блок на инструкции и карту меток.
-        Поддерживает:
-        - метки в начале строки: start:
-        - метки с командой: start: MOV r0, 1
-        - комментарии // и разделители ; и \n
-        """
         raw_lines = []
-        for piece in re.split(r';|\n', text):
-            line = piece.strip()
-            if not line:
-                continue
-            cpos = line.find('//')
-            if cpos != -1:
-                line = line[:cpos].strip()
-                if not line:
-                    continue
+        parts = re.split(r';|\n', text)
+        for p in parts:
+            line = p.strip()
+            if not line: continue
             raw_lines.append(line)
-
         self.instructions = []
-        self.labels = {}
-
         for line in raw_lines:
-            # обработка меток
-            while True:
-                m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
-                if not m:
-                    break
-                lbl, rest = m.group(1), m.group(2)
+            if line.endswith(':'):
+                lbl = line[:-1].strip()
                 self.labels[lbl] = len(self.instructions)
-                line = rest.strip()
-                if not line:
-                    break
-            if line:
+            else:
                 self.instructions.append(line)
 
     def get_val(self, token):
@@ -752,125 +759,62 @@ class AsmEmu:
         steps = 0
         while self.ip < len(self.instructions):
             line = self.instructions[self.ip]
-            parts = [p.strip() for p in re.split(r'[ ,]+', line) if p.strip()]
-            if not parts:
-                self.ip += 1
-                continue
-
+            parts = [p.strip() for p in re.split(r'[ ,]+', line) if p.strip()!='']
             op = parts[0].upper()
-
-            try:
-                # MOV x, y
-                if op == 'MOV':
-                    dst, src = parts[1], parts[2]
-                    val = self.get_val(src)
-                    if dst in self.regs:
-                        self.set_reg(dst, val)
-                    else:
-                        self.env.set(dst, val)
-                    self.ip += 1
-
-                # ADD x, y
-                elif op == 'ADD':
-                    dst, src = parts[1], parts[2]
-                    x, y = self.get_val(dst), self.get_val(src)
-                    if dst in self.regs:
-                        self.set_reg(dst, x + y)
-                    else:
-                        self.env.set(dst, x + y)
-                    self.ip += 1
-
-                # SUB x, y
-                elif op == 'SUB':
-                    dst, src = parts[1], parts[2]
-                    x, y = self.get_val(dst), self.get_val(src)
-                    if dst in self.regs:
-                        self.set_reg(dst, x - y)
-                    else:
-                        self.env.set(dst, x - y)
-                    self.ip += 1
-
-                # INC reg
-                elif op == 'INC':
-                    r = parts[1]
-                    self.set_reg(r, self.get_val(r) + 1)
-                    self.ip += 1
-
-                # DEC reg
-                elif op == 'DEC':
-                    r = parts[1]
-                    self.set_reg(r, self.get_val(r) - 1)
-                    self.ip += 1
-
-                # CMP a, b
-                elif op == 'CMP':
-                    a, b = self.get_val(parts[1]), self.get_val(parts[2])
-                    self.zero = (a == b)
-                    self.ip += 1
-
-                # JMP label
-                elif op == 'JMP':
-                    lbl = parts[1]
-                    if lbl not in self.labels:
-                        raise RuntimeError(f"Unknown label {lbl}")
+            if op == 'MOV':
+                dst, src = parts[1], parts[2]
+                val = self.get_val(src)
+                if dst in self.regs: self.set_reg(dst, val)
+                else: self.env.set(dst, val)
+                self.ip += 1
+            elif op == 'ADD':
+                dst, src = parts[1], parts[2]
+                x = self.get_val(dst); y = self.get_val(src)
+                if dst in self.regs: self.set_reg(dst, x+y)
+                else: self.env.set(dst, x+y)
+                self.ip += 1
+            elif op == 'SUB':
+                dst, src = parts[1], parts[2]
+                x = self.get_val(dst); y = self.get_val(src)
+                if dst in self.regs: self.set_reg(dst, x-y)
+                else: self.env.set(dst, x-y)
+                self.ip += 1
+            elif op == 'INC':
+                r = parts[1]; self.set_reg(r, self.get_val(r)+1); self.ip += 1
+            elif op == 'DEC':
+                r = parts[1]; self.set_reg(r, self.get_val(r)-1); self.ip += 1
+            elif op == 'CMP':
+                a = self.get_val(parts[1]); b = self.get_val(parts[2])
+                self.zero = (a == b); self.ip += 1
+            elif op == 'JMP':
+                lbl = parts[1]
+                if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
+                self.ip = self.labels[lbl]
+            elif op == 'JE':
+                lbl = parts[1]
+                if self.zero:
+                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
                     self.ip = self.labels[lbl]
-
-                # JE label
-                elif op == 'JE':
-                    lbl = parts[1]
-                    if self.zero:
-                        if lbl not in self.labels:
-                            raise RuntimeError(f"Unknown label {lbl}")
-                        self.ip = self.labels[lbl]
-                    else:
-                        self.ip += 1
-
-                # JNE label
-                elif op == 'JNE':
-                    lbl = parts[1]
-                    if not self.zero:
-                        if lbl not in self.labels:
-                            raise RuntimeError(f"Unknown label {lbl}")
-                        self.ip = self.labels[lbl]
-                    else:
-                        self.ip += 1
-
-                # LOAD reg, var
-                elif op == 'LOAD':
-                    reg, var = parts[1], parts[2]
-                    val = self.env.get(var)
-                    self.set_reg(reg, val)
-                    self.ip += 1
-
-                # STORE var, reg
-                elif op == 'STORE':
-                    var, reg = parts[1], parts[2]
-                    self.env.set(var, self.get_val(reg))
-                    self.ip += 1
-
-                # RAND var, n   → создать случайное число с n цифрами (без повторений)
-                elif op == 'RAND':
-                    var = parts[1]
-                    n = int(parts[2]) if len(parts) > 2 else 4
-                    digits = list(range(10))
-                    random.shuffle(digits)
-                    # первая цифра не может быть 0
-                    if digits[0] == 0:
-                        digits[0], digits[1] = digits[1], digits[0]
-                    val = 0
-                    for i in range(n):
-                        val = val * 10 + digits[i]
-                    self.env.set(var, val)
-                    self.ip += 1
-
                 else:
-                    raise RuntimeError(f"Unknown asm op: {op}")
-
-            except Exception as e:
-                raise RuntimeError(f"ASM error at line {self.ip + 1}: {e}")
-
+                    self.ip += 1
+            elif op == 'JNE':
+                lbl = parts[1]
+                if not self.zero:
+                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
+                    self.ip = self.labels[lbl]
+                else:
+                    self.ip += 1
+            elif op == 'LOAD':
+                reg, var = parts[1], parts[2]
+                val = self.env.get(var)
+                self.set_reg(reg, val); self.ip += 1
+            elif op == 'STORE':
+                var, reg = parts[1], parts[2]
+                self.env.set(var, self.get_val(reg)); self.ip += 1
+            else:
+                raise RuntimeError(f"Unknown asm op: {op}")
             steps += 1
-            if steps > 100000:
+            if steps > 10000:
                 raise RuntimeError("Asm: too many steps (possible infinite loop)")
 
 # ---------------- Program execution ----------------
@@ -880,33 +824,26 @@ def run_program(src, output_callback):
     tree = p.parse()
     env = Env()
 
-    # первый проход: зарегистрировать сквады (классы) и глобальные функции
     for node in tree[1]:
         if node[0] == 'squad':
             cname = node[1]
             fields_ast = node[2]
             methods_ast = node[3]
-            # сохранить поля (имена и их default AST)
             fields = []
             for f in fields_ast:
-                # ('decl', name, valOrNone)
                 fields.append( (f[1], f[2]) )
             methods = {}
             for m in methods_ast:
-                # ('funcdef', fname, params, body, in_class=True)
                 mname, params, body = m[1], m[2], m[3]
                 methods[mname] = (params, body)
             env.classes[cname] = {'fields': fields, 'methods': methods}
 
         if node[0] == 'funcdef' and not node[4]:
-            # глобальная функция
             fname, params, body = node[1], node[2], node[3]
             env.funcs[fname] = (params, body)
 
-    # второй проход: выполнить остальное
     for node in tree[1]:
-        if node[0] in ('squad','funcdef') and (node[0]=='squad' or node[4]): 
-            # определение уже учтено — пропустить (методы внутри класса тоже)
+        if node[0] in ('squad','funcdef') and (node[0]=='squad' or node[4]):
             continue
         exec_stmt(node, env, output_callback)
 
@@ -915,13 +852,11 @@ def make_instance(class_name, env):
     if not cdef:
         raise RuntimeError(f"Unknown class '{class_name}'")
     inst = {'__class__': class_name, 'fields': {}}
-    # инициализировать поля по умолчанию
     for fname, default_ast in cdef['fields']:
         inst['fields'][fname] = eval_expr(default_ast, env) if default_ast is not None else 0
     return inst
 
 def assign_to_lvalue(lv, value, env):
-    # lv может быть ('var',name) или ('getattr', objExpr, field)
     if lv[0] == 'var':
         env.set(lv[1], value)
         return
@@ -931,6 +866,15 @@ def assign_to_lvalue(lv, value, env):
         if not is_instance(obj):
             raise RuntimeError("Assign to attribute of non-object")
         obj['fields'][field] = value
+        return
+    if lv[0] == 'index':
+        seq = eval_expr(lv[1], env)
+        idx = as_int(eval_expr(lv[2], env))
+        if not isinstance(seq, list):
+            raise RuntimeError("Indexing assignment only for box (list)")
+        if idx < 0 or idx >= len(seq):
+            raise RuntimeError("Index out of range")
+        seq[idx] = value
         return
     raise RuntimeError("Unsupported lvalue")
 
@@ -956,7 +900,6 @@ def exec_stmt(stmt, env, output_callback):
         return
 
     if typ == 'evalstmt':
-        # выражение-стейтмент: вызов функции/метода и т.п.
         _ = eval_expr(stmt[1], env)
         return
 
@@ -1017,10 +960,7 @@ def exec_stmt(stmt, env, output_callback):
             ENGINE.render(); return
         raise RuntimeError(f"Unknown command {name}")
 
-    # игнорируем уже обработанные на первом проходе:
     if typ in ('squad','funcdef'):
         return
 
     raise RuntimeError(f"Unknown stmt {typ}")
-
-
