@@ -140,7 +140,7 @@ TOKEN_SPEC = [
     ('NUMBER',   r'\d+(\.\d+)?'),
     ('DOT',      r'\.'),
     ('ID',       r'[A-Za-z_][A-Za-z0-9_]*'),
-    ('OP',       r'==|!=|<=|>=|\+|\-|\*|/|%|<|>|\='),
+    ('OP',       r'==|!=|<=|>=|\|\||&&|\+|\-|\*|/|%|<|>|\=')
     ('SEMIC',    r';'),
     ('COMMA',    r','),
     ('LBRACE',   r'\{'),
@@ -684,9 +684,13 @@ def call_method(obj, mname, arg_vals, env):
             env.vars[p] = v
 
 # ---------------- Assembly emulator (как раньше) ----------------
+# ---------------- Assembly emulator ----------------
+# ---------------- Assembly emulator ----------------
+import re, random
+
 class AsmEmu:
     def __init__(self, env):
-        self.regs = {f"r{i}":0 for i in range(8)}
+        self.regs = {f"r{i}": 0 for i in range(8)}
         self.env = env
         self.zero = False
         self.labels = {}
@@ -694,18 +698,40 @@ class AsmEmu:
         self.ip = 0
 
     def parse_lines(self, text):
+        """
+        Разбивает ASM-блок на инструкции и карту меток.
+        Поддерживает:
+        - метки в начале строки: start:
+        - метки с командой: start: MOV r0, 1
+        - комментарии // и разделители ; и \n
+        """
         raw_lines = []
-        parts = re.split(r';|\n', text)
-        for p in parts:
-            line = p.strip()
-            if not line: continue
+        for piece in re.split(r';|\n', text):
+            line = piece.strip()
+            if not line:
+                continue
+            cpos = line.find('//')
+            if cpos != -1:
+                line = line[:cpos].strip()
+                if not line:
+                    continue
             raw_lines.append(line)
+
         self.instructions = []
+        self.labels = {}
+
         for line in raw_lines:
-            if line.endswith(':'):
-                lbl = line[:-1].strip()
+            # обработка меток
+            while True:
+                m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$', line)
+                if not m:
+                    break
+                lbl, rest = m.group(1), m.group(2)
                 self.labels[lbl] = len(self.instructions)
-            else:
+                line = rest.strip()
+                if not line:
+                    break
+            if line:
                 self.instructions.append(line)
 
     def get_val(self, token):
@@ -726,62 +752,125 @@ class AsmEmu:
         steps = 0
         while self.ip < len(self.instructions):
             line = self.instructions[self.ip]
-            parts = [p.strip() for p in re.split(r'[ ,]+', line) if p.strip()!='']
+            parts = [p.strip() for p in re.split(r'[ ,]+', line) if p.strip()]
+            if not parts:
+                self.ip += 1
+                continue
+
             op = parts[0].upper()
-            if op == 'MOV':
-                dst, src = parts[1], parts[2]
-                val = self.get_val(src)
-                if dst in self.regs: self.set_reg(dst, val)
-                else: self.env.set(dst, val)
-                self.ip += 1
-            elif op == 'ADD':
-                dst, src = parts[1], parts[2]
-                x = self.get_val(dst); y = self.get_val(src)
-                if dst in self.regs: self.set_reg(dst, x+y)
-                else: self.env.set(dst, x+y)
-                self.ip += 1
-            elif op == 'SUB':
-                dst, src = parts[1], parts[2]
-                x = self.get_val(dst); y = self.get_val(src)
-                if dst in self.regs: self.set_reg(dst, x-y)
-                else: self.env.set(dst, x-y)
-                self.ip += 1
-            elif op == 'INC':
-                r = parts[1]; self.set_reg(r, self.get_val(r)+1); self.ip += 1
-            elif op == 'DEC':
-                r = parts[1]; self.set_reg(r, self.get_val(r)-1); self.ip += 1
-            elif op == 'CMP':
-                a = self.get_val(parts[1]); b = self.get_val(parts[2])
-                self.zero = (a == b); self.ip += 1
-            elif op == 'JMP':
-                lbl = parts[1]
-                if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
-                self.ip = self.labels[lbl]
-            elif op == 'JE':
-                lbl = parts[1]
-                if self.zero:
-                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
-                    self.ip = self.labels[lbl]
-                else:
+
+            try:
+                # MOV x, y
+                if op == 'MOV':
+                    dst, src = parts[1], parts[2]
+                    val = self.get_val(src)
+                    if dst in self.regs:
+                        self.set_reg(dst, val)
+                    else:
+                        self.env.set(dst, val)
                     self.ip += 1
-            elif op == 'JNE':
-                lbl = parts[1]
-                if not self.zero:
-                    if lbl not in self.labels: raise RuntimeError(f"Unknown label {lbl}")
-                    self.ip = self.labels[lbl]
-                else:
+
+                # ADD x, y
+                elif op == 'ADD':
+                    dst, src = parts[1], parts[2]
+                    x, y = self.get_val(dst), self.get_val(src)
+                    if dst in self.regs:
+                        self.set_reg(dst, x + y)
+                    else:
+                        self.env.set(dst, x + y)
                     self.ip += 1
-            elif op == 'LOAD':
-                reg, var = parts[1], parts[2]
-                val = self.env.get(var)
-                self.set_reg(reg, val); self.ip += 1
-            elif op == 'STORE':
-                var, reg = parts[1], parts[2]
-                self.env.set(var, self.get_val(reg)); self.ip += 1
-            else:
-                raise RuntimeError(f"Unknown asm op: {op}")
+
+                # SUB x, y
+                elif op == 'SUB':
+                    dst, src = parts[1], parts[2]
+                    x, y = self.get_val(dst), self.get_val(src)
+                    if dst in self.regs:
+                        self.set_reg(dst, x - y)
+                    else:
+                        self.env.set(dst, x - y)
+                    self.ip += 1
+
+                # INC reg
+                elif op == 'INC':
+                    r = parts[1]
+                    self.set_reg(r, self.get_val(r) + 1)
+                    self.ip += 1
+
+                # DEC reg
+                elif op == 'DEC':
+                    r = parts[1]
+                    self.set_reg(r, self.get_val(r) - 1)
+                    self.ip += 1
+
+                # CMP a, b
+                elif op == 'CMP':
+                    a, b = self.get_val(parts[1]), self.get_val(parts[2])
+                    self.zero = (a == b)
+                    self.ip += 1
+
+                # JMP label
+                elif op == 'JMP':
+                    lbl = parts[1]
+                    if lbl not in self.labels:
+                        raise RuntimeError(f"Unknown label {lbl}")
+                    self.ip = self.labels[lbl]
+
+                # JE label
+                elif op == 'JE':
+                    lbl = parts[1]
+                    if self.zero:
+                        if lbl not in self.labels:
+                            raise RuntimeError(f"Unknown label {lbl}")
+                        self.ip = self.labels[lbl]
+                    else:
+                        self.ip += 1
+
+                # JNE label
+                elif op == 'JNE':
+                    lbl = parts[1]
+                    if not self.zero:
+                        if lbl not in self.labels:
+                            raise RuntimeError(f"Unknown label {lbl}")
+                        self.ip = self.labels[lbl]
+                    else:
+                        self.ip += 1
+
+                # LOAD reg, var
+                elif op == 'LOAD':
+                    reg, var = parts[1], parts[2]
+                    val = self.env.get(var)
+                    self.set_reg(reg, val)
+                    self.ip += 1
+
+                # STORE var, reg
+                elif op == 'STORE':
+                    var, reg = parts[1], parts[2]
+                    self.env.set(var, self.get_val(reg))
+                    self.ip += 1
+
+                # RAND var, n   → создать случайное число с n цифрами (без повторений)
+                elif op == 'RAND':
+                    var = parts[1]
+                    n = int(parts[2]) if len(parts) > 2 else 4
+                    digits = list(range(10))
+                    random.shuffle(digits)
+                    # первая цифра не может быть 0
+                    if digits[0] == 0:
+                        digits[0], digits[1] = digits[1], digits[0]
+                    val = 0
+                    for i in range(n):
+                        val = val * 10 + digits[i]
+                    self.env.set(var, val)
+                    self.ip += 1
+
+                else:
+                    raise RuntimeError(f"Unknown asm op: {op}")
+
+            except Exception as e:
+                raise RuntimeError(f"ASM error at line {self.ip + 1}: {e}")
+
             steps += 1
-            if steps > 10000:
+            if steps > 100000:
                 raise RuntimeError("Asm: too many steps (possible infinite loop)")
 
 # ---------------- Program execution ----------------
@@ -933,3 +1022,5 @@ def exec_stmt(stmt, env, output_callback):
         return
 
     raise RuntimeError(f"Unknown stmt {typ}")
+
+
